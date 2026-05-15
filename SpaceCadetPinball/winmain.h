@@ -61,11 +61,11 @@ struct WelfordState
 
 class winmain
 {
+public:
 	using Clock = SdlPerformanceClock; // Or std::chrono::steady_clock.
 	using DurationMs = std::chrono::duration<double, std::milli>;
 	using TimePoint = std::chrono::time_point<Clock>;
 
-public:
 	static constexpr const char* Version = "2.1.1 DEV";
 	static bool single_step;
 	static SDL_Window* MainWindow;
@@ -87,6 +87,17 @@ public:
 	static void Restart();
 	static void UpdateFrameRate();
 	static void HandleGameBinding(GameBindings binding, bool shortcut);
+#ifdef __EMSCRIPTEN__
+	// Push in-memory options + high scores to the ImGui ini and request an
+	// IDBFS commit. Called periodically from the main loop and on quit, since
+	// pb::uninit()/options::uninit() don't run on tab-close on the web.
+	static void WebFlushPersistence();
+#endif
+	// Per-session lifecycle (ImGui context, options, sound/midi, table data).
+	// Called once on native (and re-called by the restart loop) and from the
+	// emscripten main-loop callback when bQuit + restart fire.
+	static int  StartSession();
+	static void EndSession();
 private:
 	static int return_value;
 	static int mouse_down, last_mouse_x, last_mouse_y;
@@ -112,5 +123,6 @@ private:
 	static void RenderFrameTimeDialog();
 	static void HybridSleep(DurationMs seconds);
 	static void MainLoop();
+	static void MainLoopIteration();
 	static void ImGuiMenuItemWShortcut(GameBindings binding, bool selected = false);
 };

@@ -1,5 +1,16 @@
 #pragma once
 
+#ifdef MUSIC_TSF
+// SDL_mixer has no MIDI backend under Emscripten,
+// so a "track" here is the parsed event list
+// (tml_message*) rather than a Mix_Music.
+#include "tml.h"
+#include "tsf.h"
+using MidiHandle = tml_message*;
+#else
+using MidiHandle = Mix_Music*;
+#endif
+
 constexpr uint32_t SwapByteOrderInt(uint32_t val)
 {
 	return (val >> 24) |
@@ -102,15 +113,27 @@ public:
 	static bool play_track(MidiTracks track, bool replay);
 	static MidiTracks get_active_track();
 private:
-	static std::vector<Mix_Music*> LoadedTracks;
-	static Mix_Music* track1, * track2, * track3;
+	static std::vector<MidiHandle> LoadedTracks;
+	static MidiHandle track1, track2, track3;
 	static MidiTracks active_track, NextTrack;
 	static int Volume;
 	static bool IsPlaying, MixOpen;
 
 	static void StopPlayback();
-	static Mix_Music* load_track(std::string fileName);
-	static Mix_Music* load_track_sub(std::string fileName, bool isMidi);
-	static Mix_Music* TrackToMidi(MidiTracks track);
+	static MidiHandle load_track(std::string fileName);
+	static MidiHandle load_track_sub(std::string fileName, bool isMidi);
+	static MidiHandle TrackToMidi(MidiTracks track);
 	static std::vector<uint8_t>* MdsToMidi(std::string file);
+
+#ifdef MUSIC_TSF
+	// TinySoundFont synth state. sdl_audio_callback is registered with
+	// Mix_HookMusic; it walks CurrentMessage in real time, renders PCM, and
+	// loops back to CurrentTrackStart at end of track (like Mix_PlayMusic(-1)).
+	static void sdl_audio_callback(void* userdata, Uint8* stream, int len);
+	static tsf* TsfSynth;
+	static tml_message* CurrentMessage;
+	static tml_message* CurrentTrackStart;
+	static double MidiTime;
+	static double MsPerSample;
+#endif
 };

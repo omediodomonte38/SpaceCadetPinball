@@ -121,9 +121,15 @@ inline FILE* fopenu(const char* path, const char* opt)
 #endif
 
 // Platform specific data paths not found in SDL
-constexpr const char* PlatformDataPaths[2] = 
+constexpr const char* PlatformDataPaths[2] =
 {
 	#ifdef _WIN32
+	nullptr
+	#elif defined(__EMSCRIPTEN__)
+	// Emscripten preload mounts `--preload-file game_resources@game_resources`
+	// under /game_resources/. SDL_GetBasePath() returns "/" on the web and
+	// would never find the .dat without this hint.
+	"/game_resources/",
 	nullptr
 	#else
 	"/usr/local/share/SpaceCadetPinball/",

@@ -5,11 +5,76 @@
 #include "pb.h"
 
 
-std::vector<Mix_Music*> midi::LoadedTracks{};
-Mix_Music* midi::track1, * midi::track2, * midi::track3;
+std::vector<MidiHandle> midi::LoadedTracks{};
+MidiHandle midi::track1, midi::track2, midi::track3;
 MidiTracks midi::active_track, midi::NextTrack;
 int midi::Volume = MIX_MAX_VOLUME;
 bool midi::IsPlaying = false, midi::MixOpen = false;
+
+#ifdef MUSIC_TSF
+tsf* midi::TsfSynth = nullptr;
+tml_message* midi::CurrentMessage = nullptr;
+tml_message* midi::CurrentTrackStart = nullptr;
+double midi::MidiTime = 0.0;
+double midi::MsPerSample = 1000.0 / MIX_DEFAULT_FREQUENCY;
+
+// Audio thread: render the active MIDI track to PCM via TinySoundFont.
+// Registered with Mix_HookMusic, so SDL_mixer still mixes WAV SFX on top.
+void midi::sdl_audio_callback(void* /*userdata*/, Uint8* stream, int len)
+{
+	std::memset(stream, 0, len);
+	if (!TsfSynth || !CurrentMessage)
+		return;
+
+	constexpr int EffectBlock = 64;
+	int sampleCount = len / (2 * sizeof(short)); // stereo, 16-bit frames
+	for (int block = EffectBlock; sampleCount; sampleCount -= block,
+	     stream += block * 2 * sizeof(short))
+	{
+		if (block > sampleCount)
+			block = sampleCount;
+
+		for (MidiTime += block * MsPerSample; CurrentMessage && MidiTime >= CurrentMessage->time;)
+		{
+			switch (CurrentMessage->type)
+			{
+			case TML_PROGRAM_CHANGE:
+				tsf_channel_set_presetnumber(TsfSynth, CurrentMessage->channel, CurrentMessage->program,
+				                             CurrentMessage->channel == 9);
+				tsf_channel_midi_control(TsfSynth, CurrentMessage->channel, TML_ALL_NOTES_OFF, 0);
+				break;
+			case TML_NOTE_ON:
+				tsf_channel_note_on(TsfSynth, CurrentMessage->channel, CurrentMessage->key,
+				                    CurrentMessage->velocity / 127.0f);
+				break;
+			case TML_NOTE_OFF:
+				tsf_channel_note_off(TsfSynth, CurrentMessage->channel, CurrentMessage->key);
+				break;
+			case TML_PITCH_BEND:
+				tsf_channel_set_pitchwheel(TsfSynth, CurrentMessage->channel, CurrentMessage->pitch_bend);
+				break;
+			case TML_CONTROL_CHANGE:
+				tsf_channel_midi_control(TsfSynth, CurrentMessage->channel, CurrentMessage->control,
+				                         CurrentMessage->control_value);
+				break;
+			}
+
+			if (CurrentMessage->next == nullptr)
+			{
+				// Loop the track, mirroring Mix_PlayMusic(handle, -1).
+				MidiTime = 0.0;
+				CurrentMessage = CurrentTrackStart;
+			}
+			else
+			{
+				CurrentMessage = CurrentMessage->next;
+			}
+		}
+
+		tsf_render_short(TsfSynth, reinterpret_cast<short*>(stream), block, 0);
+	}
+}
+#endif
 
 constexpr uint32_t FOURCC(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
@@ -56,7 +121,16 @@ void midi::StopPlayback()
 	if (active_track != MidiTracks::None)
 	{
 		if (MixOpen)
+		{
+#ifdef MUSIC_TSF
+			CurrentMessage = nullptr;
+			CurrentTrackStart = nullptr;
+			if (TsfSynth)
+				tsf_note_off_all(TsfSynth);
+#else
 			Mix_HaltMusic();
+#endif
+		}
 		active_track = MidiTracks::None;
 	}
 }
@@ -64,11 +138,34 @@ void midi::StopPlayback()
 int midi::music_init(bool mixOpen, int volume)
 {
 	MixOpen = mixOpen;
-	SetVolume(volume);
+	Volume = volume;
 	active_track = MidiTracks::None;
 	NextTrack = MidiTracks::None;
 	IsPlaying = false;
 	track1 = track2 = track3 = nullptr;
+
+#ifdef MUSIC_TSF
+	// Load the embedded General MIDI soundfont and route synthesized audio
+	// through SDL_mixer's music hook. gm.sf2 ships in game_resources/.
+	if (MixOpen && !TsfSynth)
+	{
+		auto sfPath = pb::make_path_name("gm.sf2");
+		TsfSynth = tsf_load_filename(sfPath.c_str());
+		if (TsfSynth)
+		{
+			int sampleRate = MIX_DEFAULT_FREQUENCY;
+			Mix_QuerySpec(&sampleRate, nullptr, nullptr);
+			tsf_set_output(TsfSynth, TSF_STEREO_INTERLEAVED, sampleRate, 0.0f);
+			MsPerSample = 1000.0 / sampleRate;
+			Mix_HookMusic(sdl_audio_callback, nullptr);
+		}
+		else
+		{
+			printf("midi: failed to load soundfont %s\n", sfPath.c_str());
+		}
+	}
+#endif
+	SetVolume(volume);
 
 	if (pb::FullTiltMode)
 	{
@@ -93,10 +190,23 @@ void midi::music_shutdown()
 {
 	music_stop();
 
+#ifdef MUSIC_TSF
+	Mix_HookMusic(nullptr, nullptr);
+	CurrentMessage = nullptr;
+	CurrentTrackStart = nullptr;
+	for (auto midi : LoadedTracks)
+		tml_free(midi);
+	if (TsfSynth)
+	{
+		tsf_close(TsfSynth);
+		TsfSynth = nullptr;
+	}
+#else
 	for (auto midi : LoadedTracks)
 	{
 		Mix_FreeMusic(midi);
 	}
+#endif
 	active_track = MidiTracks::None;
 	LoadedTracks.clear();
 }
@@ -105,10 +215,17 @@ void midi::SetVolume(int volume)
 {
 	Volume = volume;
 	if (MixOpen)
+	{
+#ifdef MUSIC_TSF
+		if (TsfSynth)
+			tsf_set_volume(TsfSynth, volume / static_cast<float>(MIX_MAX_VOLUME));
+#else
 		Mix_VolumeMusic(volume);
+#endif
+	}
 }
 
-Mix_Music* midi::load_track(std::string fileName)
+MidiHandle midi::load_track(std::string fileName)
 {
 	if (!MixOpen || pb::quickFlag)
 		return nullptr;
@@ -131,11 +248,11 @@ Mix_Music* midi::load_track(std::string fileName)
 	return audio;
 }
 
-Mix_Music* midi::load_track_sub(std::string fileName, bool isMidi)
+MidiHandle midi::load_track_sub(std::string fileName, bool isMidi)
 {
 	// FT has music in two formats, depending on game version: MIDI in 16bit, MIDS in 32bit.
 	// 3DPB music is MIDI only.
-	Mix_Music* audio = nullptr;
+	MidiHandle audio = nullptr;
 	fileName += isMidi ? ".MID" : ".MDS";
 	for (int i = 0; i < 2; i++)
 	{
@@ -149,8 +266,12 @@ Mix_Music* midi::load_track_sub(std::string fileName, bool isMidi)
 			if (fileHandle)
 			{
 				fclose(fileHandle);
+#ifdef MUSIC_TSF
+				audio = tml_load_filename(filePath.c_str());
+#else
 				auto rw = SDL_RWFromFile(filePath.c_str(), "rb");
 				audio = Mix_LoadMUS_RW(rw, 1);
+#endif
 				break;
 			}
 		}
@@ -165,8 +286,12 @@ Mix_Music* midi::load_track_sub(std::string fileName, bool isMidi)
 				fwrite(midi->data(), 1, midi->size(), fileHandle);
 				fclose(fileHandle);*/
 
+#ifdef MUSIC_TSF
+				audio = tml_load_memory(midi->data(), static_cast<int>(midi->size()));
+#else
 				auto rw = SDL_RWFromMem(midi->data(), static_cast<int>(midi->size()));
 				audio = Mix_LoadMUS_RW(rw, 1); // This call seems to leak memory no matter what.
+#endif
 				delete midi;
 				break;
 			}
@@ -190,11 +315,21 @@ bool midi::play_track(MidiTracks track, bool replay)
 		return false;
 	}
 
+#ifdef MUSIC_TSF
+	if (MixOpen)
+	{
+		// Point the synth playhead at the track; sdl_audio_callback takes over.
+		CurrentTrackStart = midi;
+		CurrentMessage = midi;
+		MidiTime = 0.0;
+	}
+#else
 	if (MixOpen && Mix_PlayMusic(midi, -1))
 	{
 		active_track = MidiTracks::None;
 		return false;
 	}
+#endif
 
 	// On Windows, MIDI volume can only be set during playback.
 	// And it changes application master volume for some reason.
@@ -211,9 +346,9 @@ MidiTracks midi::get_active_track()
 		return active_track;
 }
 
-Mix_Music* midi::TrackToMidi(MidiTracks track)
+MidiHandle midi::TrackToMidi(MidiTracks track)
 {
-	Mix_Music* midi;
+	MidiHandle midi;
 	switch (track)
 	{
 	default:

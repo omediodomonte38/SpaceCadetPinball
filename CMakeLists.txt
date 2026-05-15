@@ -3,6 +3,10 @@ project(SpaceCadetPinball)
 
 set(CMAKE_CXX_STANDARD 11)
 
+# TinySoundFont MIDI synthesis. SDL_mixer has no MIDI backend under Emscripten,
+# so this is forced ON for the web build below, off by default elsewhere
+# (desktop SDL_mixer handles MIDI natively).
+option(MUSIC_TSF "Use TinySoundFont for MIDI playback" OFF)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/bin)
 
@@ -32,8 +36,29 @@ endif()
 # SDL2main is not needed
 set(SDL2_BUILDING_LIBRARY ON)
 
-find_package(SDL2 REQUIRED)
-FIND_PACKAGE(SDL2_mixer REQUIRED)
+if(${CMAKE_SYSTEM_NAME} MATCHES "Emscripten")
+    # Emscripten provides SDL2 + SDL2_mixer as built-in ports.
+    set(USE_FLAGS "-s USE_SDL=2 -s USE_SDL_MIXER=2")
+
+    # SDL_mixer has no MIDI backend on the web, so synthesize MIDI with TinySoundFont.
+    set(MUSIC_TSF ON)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${USE_FLAGS}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${USE_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${USE_FLAGS}")
+    set(CMAKE_EXECUTABLE_SUFFIX .html)
+
+    # Size-optimize the web build -Oz instead of -O3 for compile
+    set(CMAKE_CXX_FLAGS_RELEASE "-Oz -DNDEBUG")
+    set(CMAKE_C_FLAGS_RELEASE "-Oz -DNDEBUG")
+
+    set(SDL2_FOUND TRUE)
+    set(SDL2_INCLUDE_DIR "${EMSCRIPTEN_ROOT_PATH}/system/include/SDL2/")
+    set(SDL2_MIXER_INCLUDE_DIR "${EMSCRIPTEN_ROOT_PATH}/system/include/SDL2/")
+    set(SDL2_LIBRARIES "nul")
+else()
+    find_package(SDL2 REQUIRED)
+    FIND_PACKAGE(SDL2_mixer REQUIRED)
+endif()
 
 include_directories(${SDL2_INCLUDE_DIR} ${SDL2_MIXER_INCLUDE_DIR})
 get_property(dirs DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY INCLUDE_DIRECTORIES)
@@ -194,7 +219,19 @@ if(WIN32)
     list(APPEND SOURCE_FILES SpaceCadetPinball/SpaceCadetPinball.rc)
 endif(WIN32)
 
+# TinySoundFont MIDI synth
+if(MUSIC_TSF)
+    list(APPEND SOURCE_FILES
+            SpaceCadetPinball/tsf.cpp
+            SpaceCadetPinball/tsf.h
+            SpaceCadetPinball/tml.h)
+endif()
+
 add_executable(SpaceCadetPinball ${SOURCE_FILES})
+
+if(MUSIC_TSF)
+    target_compile_definitions(SpaceCadetPinball PRIVATE MUSIC_TSF)
+endif()
 
 # Skip pch on foreign code
 set_source_files_properties(
@@ -206,6 +243,7 @@ set_source_files_properties(
         SpaceCadetPinball/imgui_demo.cpp
         SpaceCadetPinball/imgui_impl_sdl.cpp
         SpaceCadetPinball/imgui_impl_sdlrenderer.cpp
+        SpaceCadetPinball/tsf.cpp
         PROPERTIES SKIP_PRECOMPILE_HEADERS 1
 )
 
@@ -217,6 +255,20 @@ if(${CMAKE_VERSION} VERSION_GREATER "3.16.0" OR ${CMAKE_VERSION} VERSION_EQUAL "
 endif()
 
 target_link_libraries(SpaceCadetPinball ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARY})
+
+# Emscripten / WebAssembly build: link IDBFS, bake game_resources into the
+# .data bundle, and use the custom HTML shell. Size-optimized (-Oz, Closure).
+# Addying -flto corrupts SDL2's EM_ASM
+if(${CMAKE_SYSTEM_NAME} MATCHES "Emscripten")
+    target_link_libraries(SpaceCadetPinball idbfs.js)
+    set_target_properties(SpaceCadetPinball PROPERTIES LINK_FLAGS
+        "-s ALLOW_MEMORY_GROWTH=1 -s FORCE_FILESYSTEM=1 \
+        -s EXPORTED_RUNTIME_METHODS=FS,IDBFS,addRunDependency,removeRunDependency \
+        -s EXPORTED_FUNCTIONS=_main,_web_flush_persistence,_web_touch_down,_web_touch_up,_web_pointer_down,_web_pointer_up,_web_menu_bar_height,_web_modal_open \
+        -Oz \
+        --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/SpaceCadetPinball/emscripten_shell.html \
+        --preload-file ${CMAKE_CURRENT_SOURCE_DIR}/game_resources@game_resources")
+endif()
 
 # On Windows, copy DLL to output
 if(WIN32)

@@ -275,6 +275,17 @@ float maths::basic_collision(TBall* ball, vector2* nextPosition, vector2* direct
 	float reboundSpeed = reboundProj * ball->Speed;
 	ball->Speed -= (1.0f - elasticity) * reboundSpeed;
 
+	// Resting-contact damping. The 2.1.0 collision rewrite sometimes rebounds
+	// elastically with no stop, so a ball sitting on a surface micro-bounces forever
+	// instead of settling. Upstream issue #210.
+	//Below RestThreshold the rebound is just one tick of gravity
+    // so the ball actually comes to rest. Real shots have rebound speeds
+    // above this, so gameplay collisions are not affected. This is probably a kludge,
+    // but it works (to an extent)
+	constexpr float RestThreshold = 0.25f;
+	if (reboundSpeed < RestThreshold)
+		ball->Speed -= elasticity * reboundSpeed;
+
 	if (reboundSpeed >= threshold)
 	{
 		// Change ball direction if rebound speed is above threshold

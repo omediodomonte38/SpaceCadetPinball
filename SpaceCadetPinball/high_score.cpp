@@ -6,6 +6,16 @@
 #include "score.h"
 #include "translations.h"
 
+// Per-table key namespace. Without this, switching tables would overwrite
+// the other table's stored scores: both used "0.Name".."4.Score" + a single
+// "Verification" key
+static const char* ScoreKeyPrefix()
+{
+	if (pb::FullTiltDemoMode) return "demo_";
+	if (pb::FullTiltMode)     return "ft_";
+	return "";
+}
+
 bool high_score::dlg_enter_name;
 bool high_score::ShowDialog = false;
 high_score_entry high_score::DlgData;
@@ -14,7 +24,8 @@ high_score_struct high_score::highscore_table[5];
 
 int high_score::read()
 {
-	char Buffer[20];
+	char Buffer[32];
+	const char* prefix = ScoreKeyPrefix();
 
 	int checkSum = 0;
 	clear_table();
@@ -22,13 +33,11 @@ int high_score::read()
 	{
 		auto& tablePtr = highscore_table[position];
 
-		snprintf(Buffer, sizeof Buffer, "%d", position);
-		strcat(Buffer, ".Name");
+		snprintf(Buffer, sizeof Buffer, "%s%d.Name", prefix, position);
 		auto name = options::GetSetting(Buffer, "");
 		strncpy(tablePtr.Name, name.c_str(), sizeof tablePtr.Name);
 
-		snprintf(Buffer, sizeof Buffer, "%d", position);
-		strcat(Buffer, ".Score");
+		snprintf(Buffer, sizeof Buffer, "%s%d.Score", prefix, position);
 		tablePtr.Score = options::get_int(Buffer, tablePtr.Score);
 
 		for (int i = static_cast<int>(strlen(tablePtr.Name)); --i >= 0; checkSum += tablePtr.Name[i])
@@ -37,7 +46,8 @@ int high_score::read()
 		checkSum += tablePtr.Score;
 	}
 
-	auto verification = options::get_int("Verification", 7);
+	snprintf(Buffer, sizeof Buffer, "%sVerification", prefix);
+	auto verification = options::get_int(Buffer, 7);
 	if (checkSum != verification)
 		clear_table();
 	return 0;
@@ -45,19 +55,18 @@ int high_score::read()
 
 int high_score::write()
 {
-	char Buffer[20];
+	char Buffer[32];
+	const char* prefix = ScoreKeyPrefix();
 
 	int checkSum = 0;
 	for (auto position = 0; position < 5; ++position)
 	{
 		auto& tablePtr = highscore_table[position];
 
-		snprintf(Buffer, sizeof Buffer, "%d", position);
-		strcat(Buffer, ".Name");
+		snprintf(Buffer, sizeof Buffer, "%s%d.Name", prefix, position);
 		options::SetSetting(Buffer, tablePtr.Name);
 
-		snprintf(Buffer, sizeof Buffer, "%d", position);
-		strcat(Buffer, ".Score");
+		snprintf(Buffer, sizeof Buffer, "%s%d.Score", prefix, position);
 		options::set_int(Buffer, tablePtr.Score);
 
 		for (int i = static_cast<int>(strlen(tablePtr.Name)); --i >= 0; checkSum += tablePtr.Name[i])
@@ -66,7 +75,8 @@ int high_score::write()
 		checkSum += tablePtr.Score;
 	}
 
-	options::set_int("Verification", checkSum);
+	snprintf(Buffer, sizeof Buffer, "%sVerification", prefix);
+	options::set_int(Buffer, checkSum);
 	return 0;
 }
 
@@ -117,12 +127,25 @@ void high_score::show_and_set_high_score_dialog(high_score_entry score)
 	ShowDialog = true;
 }
 
+// append the active table name so users who switch can tell which
+// top scores they are viewing
+static std::string HighScoresCaption()
+{
+	std::string caption = pb::get_rc_string(Msg::HIGHSCORES_Caption);
+	if (pb::FullTiltDemoMode)     caption += " - Full Tilt Demo";
+	else if (pb::FullTiltMode)    caption += " - Full Tilt";
+	else                          caption += " - 3D Pinball";
+	return caption;
+}
+
 void high_score::RenderHighScoreDialog()
 {
+	const std::string caption = HighScoresCaption();
+	const char*       captionC = caption.c_str();
 	if (ShowDialog == true)
 	{
 		ShowDialog = false;
-		if (!ImGui::IsPopupOpen(pb::get_rc_string(Msg::HIGHSCORES_Caption)))
+		if (!ImGui::IsPopupOpen(captionC))
 		{
 			dlg_enter_name = false;
 			while (!ScoreQueue.empty())
@@ -141,12 +164,12 @@ void high_score::RenderHighScoreDialog()
 				}
 			}
 
-			ImGui::OpenPopup(pb::get_rc_string(Msg::HIGHSCORES_Caption));
+			ImGui::OpenPopup(captionC);
 		}
 	}
 
 	bool unused_open = true, textBoxSubmit = false;
-	if (ImGui::BeginPopupModal(pb::get_rc_string(Msg::HIGHSCORES_Caption), &unused_open, ImGuiWindowFlags_AlwaysAutoResize))
+	if (ImGui::BeginPopupModal(captionC, &unused_open, ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		if (ImGui::BeginTable("table1", 3, ImGuiTableFlags_Borders))
 		{
@@ -230,7 +253,7 @@ void high_score::RenderHighScoreDialog()
 		ImGui::EndPopup();
 
 		// Reenter dialog for the next score in the queue
-		if (!ImGui::IsPopupOpen(pb::get_rc_string(Msg::HIGHSCORES_Caption)) && !ScoreQueue.empty())
+		if (!ImGui::IsPopupOpen(captionC) && !ScoreQueue.empty())
 		{
 			ShowDialog = true;
 		}

@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3D Pinball - Space Cadet</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Full Tilt &amp; 3D Pinball Space Cadet, running in your browser via WebAssembly. International keyboard layouts supported.">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Space Cadet">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- Open Graph / Twitter -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="3D Pinball &mdash; Space Cadet">
+<meta property="og:description" content="Full Tilt &amp; 3D Pinball Space Cadet, running in your browser via WebAssembly.">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+        color: #ddd;
+        font-family: -apple-system, system-ui, sans-serif;
+    }
+    body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    canvas#canvas {
+        display: block;
+        background: #000;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+        /* Fill the viewport, but let object-fit keep the canvas's intrinsic
+           aspect ratio. Without object-fit the previous rules (max-width
+           100vw + height 100vh) caused vertical stretching on portrait
+           phones whenever the canvas's intrinsic width exceeded the
+           viewport width (common with the 1024x768 Full Tilt table). */
+        width: 100vw;
+        height: 100vh;
+        object-fit: contain;
+        outline: none;
+    }
+    #status {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        text-align: center;
+        font-size: 16px;
+        line-height: 1.5;
+        letter-spacing: 0.02em;
+        pointer-events: none;
+        min-width: 360px;
+    }
+    #status .title {
+        font-size: 28px;
+        font-weight: 600;
+        margin-bottom: 14px;
+        color: #fff;
+        text-shadow: 0 0 16px rgba(120,180,255,0.35);
+    }
+    #status .label { color: #aab; }
+    #status .pct   { color: #fff; font-variant-numeric: tabular-nums; }
+    #bar {
+        margin: 12px auto 0;
+        width: 360px;
+        height: 8px;
+        background: rgba(255,255,255,0.08);
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    #bar > div {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #4a90e2, #7ec8ff);
+        transition: width 120ms linear;
+    }
+    #log {
+        position: fixed;
+        right: 0;
+        top: 0;
+        width: 40vw;
+        max-height: 100vh;
+        overflow-y: auto;
+        font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace;
+        background: rgba(0,0,0,0.55);
+        color: #cfc;
+        padding: 6px 8px;
+        white-space: pre-wrap;
+        z-index: 5;
+        display: none;
+    }
+    #log.show { display: block; }
+    #log .err { color: #f88; }
+</style>
+</head>
+<body>
+    <div id="status">
+        <div class="title">3D Pinball &mdash; Space Cadet</div>
+        <div><span class="label" id="status-label">Loading&hellip;</span> <span class="pct" id="status-pct"></span></div>
+        <div id="bar"><div id="bar-fill"></div></div>
+    </div>
+    <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+    <pre id="log"></pre>
+
+    <script type='text/javascript'>
+        var statusElement = document.getElementById('status');
+        var statusLabel = document.getElementById('status-label');
+        var statusPct   = document.getElementById('status-pct');
+        var barFill     = document.getElementById('bar-fill');
+        var canvasElement = document.getElementById('canvas');
+        var logElement = document.getElementById('log');
+
+        // Toggle the on-page log with backtick (`). Auto-shows on any error.
+        // Also show automatically when URL contains ?log.
+        function appendLog(text, isErr) {
+            var line = document.createElement('span');
+            if (isErr) line.className = 'err';
+            line.textContent = text + '\n';
+            logElement.appendChild(line);
+            logElement.scrollTop = logElement.scrollHeight;
+            if (isErr) logElement.classList.add('show');
+        }
+        if (location.search.indexOf('log') !== -1) logElement.classList.add('show');
+        window.addEventListener('keydown', function (e) {
+            if (e.key === '`') { logElement.classList.toggle('show'); e.preventDefault(); }
+        }, true);
+
+        var Module = {
+            print:    function (text) { console.log(text);   appendLog(text, false); },
+            printErr: function (text) { console.error(text); appendLog(text, true);  },
+            canvas: (function () {
+                canvasElement.addEventListener("webglcontextlost", function (e) {
+                    alert('WebGL context lost. Reload the page.');
+                    e.preventDefault();
+                }, false);
+                return canvasElement;
+            })(),
+            setStatus: function (text) {
+                if (!Module.setStatus.last) Module.setStatus.last = { time: Date.now(), text: '' };
+                if (text === Module.setStatus.last.text) return;
+                var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+                var now = Date.now();
+                if (m && now - Module.setStatus.last.time < 30) return;
+                Module.setStatus.last.time = now;
+                Module.setStatus.last.text = text;
+                if (m) {
+                    var cur = parseFloat(m[2]), tot = parseFloat(m[4]);
+                    var pct = tot > 0 ? Math.min(100, (cur / tot) * 100) : 0;
+                    statusLabel.textContent = m[1].trim();
+                    statusPct.textContent = pct.toFixed(0) + '%';
+                    barFill.style.width = pct + '%';
+                    statusElement.style.display = '';
+                } else if (text) {
+                    statusLabel.textContent = text;
+                    statusPct.textContent = '';
+                    // Indeterminate: animate the bar to show it's not stuck.
+                    barFill.style.width = '100%';
+                    statusElement.style.display = '';
+                } else {
+                    statusElement.style.display = 'none';
+                }
+            },
+            totalDependencies: 0,
+            monitorRunDependencies: function (left) {
+                this.totalDependencies = Math.max(this.totalDependencies, left);
+                Module.setStatus(left
+                    ? 'Preparing… (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')'
+                    : '');
+            }
+        };
+        // ?table=ft|3dpb URL override: sets which pinball table to load on
+        // first session this visit. Doesn't persist, so the user's saved
+        // default applies on later visits without the param. Cached on
+        // window so C++ can read it via EM_ASM_INT (see StartSession).
+        (function () {
+            var m = (location.search || '').match(/[?&]table=([^&]+)/);
+            var v = m ? m[1].toLowerCase() : '';
+            // -1 = no override, 0 = Full Tilt, 1 = 3DPB. Matches the
+            // Prefer3DPBGameData option's boolean meaning.
+            if (v === 'ft' || v === 'fulltilt' || v === 'cadet')      window.__pinball_table_override = 0;
+            else if (v === '3dpb' || v === 'plus' || v === 'pinball') window.__pinball_table_override = 1;
+            else                                                       window.__pinball_table_override = -1;
+        })();
+
+        // Persist options/high scores via IDBFS, mounted at the SDL prefPath
+        // (/libsdl/<app>/ on Emscripten). preRun blocks main() on syncfs(true)
+        // via addRunDependency so the game sees the saved files at startup.
+        Module.preRun = (Module.preRun || []).concat([function () {
+            appendLog('[idbfs] preRun start', false);
+            Module.addRunDependency('idbfs-load');
+            var done = false;
+            function finish(tag) {
+                if (done) return;
+                done = true;
+                appendLog('[idbfs] ' + tag, false);
+                Module.removeRunDependency('idbfs-load');
+            }
+            try {
+                try { Module.FS.mkdirTree('/libsdl/SpaceCadetPinball'); }
+                catch (e) { appendLog('[idbfs] mkdirTree: ' + e, true); }
+                Module.FS.mount(Module.IDBFS, {}, '/libsdl/SpaceCadetPinball');
+                Module.FS.syncfs(true, function (err) {
+                    if (err) appendLog('[idbfs] load failed: ' + err, true);
+                    finish('loaded');
+                });
+                // Safety net: never let main() hang on us.
+                setTimeout(function () { finish('timeout'); }, 4000);
+            } catch (e) {
+                appendLog('[idbfs] setup threw: ' + e, true);
+                finish('threw');
+            }
+        }]);
+        // Touch controls. The canvas is divided into three vertical bands at
+        // each finger's contact: left third → left flipper, right third →
+        // right flipper, bottom-center band → plunger pull (release = fire).
+        // Each finger is tracked independently so two-thumb play works.
+        // Action IDs match the GameBindings enum on the C++ side.
+        var ACT_LEFT_FLIPPER  = 0;
+        var ACT_RIGHT_FLIPPER = 1;
+        var ACT_PLUNGER       = 2;
+        var activeFingers = {}; // identifier -> action id
+        // Convert touch coords to game-space [0..1], undoing the letterbox
+        // / pillarbox from `object-fit: contain` on the canvas. Element-space
+        // coords don't line up with the visible playfield once the canvas is
+        // letterboxed, so a touch in the visible plunger band would
+        // otherwise miss its region and fall through to a flipper.
+        function gameCoords(t, rect) {
+            var iw = canvasElement.width  || rect.width;
+            var ih = canvasElement.height || rect.height;
+            var scale = Math.min(rect.width / iw, rect.height / ih);
+            var dispW = iw * scale;
+            var dispH = ih * scale;
+            var offX  = (rect.width  - dispW) / 2;
+            var offY  = (rect.height - dispH) / 2;
+            var x = (t.clientX - rect.left - offX) / dispW;
+            var y = (t.clientY - rect.top  - offY) / dispH;
+            // Clamp so a touch in a letterbox bar resolves to the nearest
+            // edge action rather than falling outside the [0,1] range.
+            if (x < 0) x = 0; else if (x > 1) x = 1;
+            if (y < 0) y = 0; else if (y > 1) y = 1;
+            return { x: x, y: y };
+        }
+        function actionForTouch(t, rect) {
+            var p = gameCoords(t, rect);
+            // Bottom 20% center 40% is the plunger band. Same thresholds as
+            // the RenderTouchHints overlay in winmain.cpp, keep them in sync.
+            if (p.y > 0.80 && p.x > 0.30 && p.x < 0.70) return ACT_PLUNGER;
+            return p.x < 0.5 ? ACT_LEFT_FLIPPER : ACT_RIGHT_FLIPPER;
+        }
+        // Route to UI (mouse event) vs game (flipper/plunger key) based on
+        // touch location and modal state. Returned object stores enough
+        // state for matching touchend to know how it dispatched.
+        var ACT_POINTER = 99;
+        function routeForTouch(t, rect) {
+            var p = gameCoords(t, rect);
+            var iw = canvasElement.width  || 1;
+            var ih = canvasElement.height || 1;
+            var gx = Math.round(p.x * iw);
+            var gy = Math.round(p.y * ih);
+            var menuH  = Module._web_menu_bar_height ? Module._web_menu_bar_height() : 0;
+            var modal  = Module._web_modal_open      ? Module._web_modal_open()      : 0;
+            // Any modal open OR touch is over the top menu bar → treat
+            // as a UI pointer click instead of a game action.
+            if (modal || (menuH > 0 && gy < menuH)) {
+                return { kind: ACT_POINTER, x: gx, y: gy };
+            }
+            return { kind: actionForTouch(t, rect) };
+        }
+        function touchPress(act) {
+            if (Module._web_touch_down) Module._web_touch_down(act);
+        }
+        function touchRelease(act) {
+            if (Module._web_touch_up) Module._web_touch_up(act);
+        }
+        Module.postRun = (Module.postRun || []).concat([function () {
+            var canvas = canvasElement;
+            function dispatchPress(r) {
+                if (r.kind === ACT_POINTER) {
+                    if (Module._web_pointer_down) Module._web_pointer_down(r.x, r.y);
+                } else {
+                    touchPress(r.kind);
+                }
+            }
+            function dispatchRelease(r) {
+                if (r.kind === ACT_POINTER) {
+                    if (Module._web_pointer_up) Module._web_pointer_up(r.x, r.y);
+                } else {
+                    touchRelease(r.kind);
+                }
+            }
+            canvas.addEventListener('touchstart', function (e) {
+                e.preventDefault();
+                var rect = canvas.getBoundingClientRect();
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var t = e.changedTouches[i];
+                    var r = routeForTouch(t, rect);
+                    activeFingers[t.identifier] = r;
+                    dispatchPress(r);
+                }
+            }, { passive: false });
+            canvas.addEventListener('touchend', function (e) {
+                e.preventDefault();
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var t = e.changedTouches[i];
+                    var r = activeFingers[t.identifier];
+                    if (r !== undefined) {
+                        dispatchRelease(r);
+                        delete activeFingers[t.identifier];
+                    }
+                }
+            }, { passive: false });
+            canvas.addEventListener('touchcancel', function (e) {
+                for (var i = 0; i < e.changedTouches.length; i++) {
+                    var t = e.changedTouches[i];
+                    var r = activeFingers[t.identifier];
+                    if (r !== undefined) {
+                        dispatchRelease(r);
+                        delete activeFingers[t.identifier];
+                    }
+                }
+            });
+        }]);
+        Module.postRun = (Module.postRun || []).concat([function () {
+            // Push live game state → ImGui ini → IndexedDB. The C++ side runs
+            // this every 5s in the main loop, and here we add it on tab-hide so a
+            // reload right after a high score still saves.
+            function flush() {
+                try {
+                    if (Module._web_flush_persistence) Module._web_flush_persistence();
+                    else if (Module.FS) Module.FS.syncfs(false, function () {});
+                } catch (e) { console.error('flush threw:', e); }
+            }
+            document.addEventListener('visibilitychange', function () {
+                if (document.hidden) flush();
+            });
+            window.addEventListener('pagehide', flush);
+            window.addEventListener('beforeunload', flush);
+        }]);
+        Module.setStatus('Downloading…');
+        window.onerror = function () {
+            Module.setStatus('Exception thrown, see JavaScript console');
+            Module.setStatus = function (text) {
+                if (text) Module.printErr('[post-exception status] ' + text);
+            };
+        };
+        // Prevent arrow keys / space / slash from scrolling or triggering
+        // browser shortcuts while playing.
+        window.addEventListener('keydown', function (e) {
+            if ([' ', '/', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].indexOf(e.key) !== -1) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+    </script>
+    {{{ SCRIPT }}}
+</body>
+</html>

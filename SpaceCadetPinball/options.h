@@ -289,4 +289,7 @@ struct optionsStruct
 	StringOption FontFileName;
 	StringOption Language;
 	BoolOption HideCursor;
+	// First-run overlay over the canvas showing where to tap for flippers
+	// and plunger on touch devices. Auto-dismissed on first touch.
+	BoolOption ShowTouchHints;
 };

@@ -21,107 +21,113 @@ std::vector<OptionBase*> options::AllOptions{};
 optionsStruct options::Options
 {
 	{
+		// Keyboard `Value` is an SDL_Scancode (physical key position), not an
+		// SDLK_* keysym. This is what makes the right flipper work on Spanish
+		// or other non-US layouts where the key right of `M` doesn't print
+		// `/`. The rowName was renamed ("key" to "scancode") so older INI
+		// rows holding SDLK_* values are ignored on upgrade rather than
+		// silently misbinding.
 		{
-			"Left Flipper key",
+			"Left Flipper scancode",
 			Msg::KEYMAPPER_FlipperL,
-			{InputTypes::Keyboard, SDLK_z},
+			{InputTypes::Keyboard, SDL_SCANCODE_Z},
 			{InputTypes::Mouse, SDL_BUTTON_LEFT},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_LEFTSHOULDER}
 		},
 		{
-			"Right Flipper key",
+			"Right Flipper scancode",
 			Msg::KEYMAPPER_FlipperR,
-			{InputTypes::Keyboard, SDLK_SLASH},
+			{InputTypes::Keyboard, SDL_SCANCODE_SLASH},
 			{InputTypes::Mouse,SDL_BUTTON_RIGHT},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER}
 		},
 		{
-			"Plunger key",
+			"Plunger scancode",
 			Msg::KEYMAPPER_Plunger,
-			{InputTypes::Keyboard, SDLK_SPACE},
+			{InputTypes::Keyboard, SDL_SCANCODE_SPACE},
 			{InputTypes::Mouse,SDL_BUTTON_MIDDLE},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_A}
 		},
 		{
-			"Left Table Bump key",
+			"Left Table Bump scancode",
 			Msg::KEYMAPPER_BumpLeft,
-			{InputTypes::Keyboard, SDLK_x},
+			{InputTypes::Keyboard, SDL_SCANCODE_X},
 			{InputTypes::Mouse,SDL_BUTTON_X1},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_DPAD_LEFT}
 		},
 		{
-			"Right Table Bump key",
+			"Right Table Bump scancode",
 			Msg::KEYMAPPER_BumpRight,
-			{InputTypes::Keyboard, SDLK_PERIOD},
+			{InputTypes::Keyboard, SDL_SCANCODE_PERIOD},
 			{InputTypes::Mouse,SDL_BUTTON_X2},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_DPAD_RIGHT}
 		},
 		{
-			"Bottom Table Bump key",
+			"Bottom Table Bump scancode",
 			Msg::KEYMAPPER_BumpBottom,
-			{InputTypes::Keyboard, SDLK_UP},
+			{InputTypes::Keyboard, SDL_SCANCODE_UP},
 			{InputTypes::Mouse,SDL_BUTTON_X2 + 1},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_DPAD_UP}
 		},
 		{
-			"New Game",
+			"New Game scancode",
 			Msg::Menu1_New_Game,
-			{InputTypes::Keyboard, SDLK_F2},
+			{InputTypes::Keyboard, SDL_SCANCODE_F2},
 			{},
 			{}
 		},
 		{
-			"Toggle Pause",
+			"Toggle Pause scancode",
 			Msg::Menu1_Pause_Resume_Game,
-			{InputTypes::Keyboard, SDLK_F3},
+			{InputTypes::Keyboard, SDL_SCANCODE_F3},
 			{},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_START}
 		},
 		{
-			"Toggle FullScreen",
+			"Toggle FullScreen scancode",
 			Msg::Menu1_Full_Screen,
-			{InputTypes::Keyboard, SDLK_F4},
+			{InputTypes::Keyboard, SDL_SCANCODE_F4},
 			{},
 			{}
 		},
 		{
-			"Toggle Sounds",
+			"Toggle Sounds scancode",
 			Msg::Menu1_Sounds,
-			{InputTypes::Keyboard, SDLK_F5},
+			{InputTypes::Keyboard, SDL_SCANCODE_F5},
 			{},
 			{}
 		},
 		{
-			"Toggle Music",
+			"Toggle Music scancode",
 			Msg::Menu1_Music,
-			{InputTypes::Keyboard, SDLK_F6},
+			{InputTypes::Keyboard, SDL_SCANCODE_F6},
 			{},
 			{}
 		},
 		{
-			"Show Control Dialog",
+			"Show Control Dialog scancode",
 			Msg::Menu1_Player_Controls,
-			{InputTypes::Keyboard, SDLK_F8},
+			{InputTypes::Keyboard, SDL_SCANCODE_F8},
 			{},
 			{}
 		},
 		{
-			"Toggle Menu Display",
+			"Toggle Menu Display scancode",
 			Msg::Menu1_ToggleShowMenu,
-			{InputTypes::Keyboard, SDLK_F9},
+			{InputTypes::Keyboard, SDL_SCANCODE_F9},
 			{},
 			{}
 		},
 		{
-			"Exit",
+			"Exit scancode",
 			Msg::Menu1_Exit,
-			{InputTypes::Keyboard, SDLK_ESCAPE},
+			{InputTypes::Keyboard, SDL_SCANCODE_ESCAPE},
 			{},
 			{InputTypes::GameController, SDL_CONTROLLER_BUTTON_BACK}
 		},
 	},
 	{"Sounds", true},
-	{"Music", false},
+	{"Music", true},
 	{"FullScreen", false},
 	{"Players", 1},
 	{"Screen Resolution", -1},
@@ -152,6 +158,7 @@ optionsStruct options::Options
 	{"FontFileName", ""},
 	{"Language", translations::GetCurrentLanguage()->ShortName},
 	{"Hide Cursor", false},
+	{"Show Touch Hints", true},
 };
 
 void options::InitPrimary()
@@ -306,6 +313,10 @@ void options::toggle(Menu1 uIDCheckItem)
 		break;
 	case Menu1::Prefer3DPBGameData:
 		Options.Prefer3DPBGameData ^= true;
+		// 3DPB table is 640x480 only, full tilt can up to 1024x768.
+		// Reset to "Maximum" so a new table uses its own native max instead
+		// of whatever was there before
+		Options.Resolution = -1;
 		winmain::Restart();
 		break;
 	case Menu1::WindowIntegerScale:
@@ -568,7 +579,11 @@ std::string GameInput::GetShortInputDescription() const
 	switch (Type)
 	{
 	case InputTypes::Keyboard:
-		keyName = SDL_GetKeyName(Value);
+		// Value is now a scancode so it can resolve through the user's current layout
+		// so the rebind UI shows the glyph that actually prints on the actual key
+		keyName = SDL_GetKeyName(SDL_GetKeyFromScancode(static_cast<SDL_Scancode>(Value)));
+		if (keyName.empty())
+			keyName = SDL_GetScancodeName(static_cast<SDL_Scancode>(Value));
 		break;
 	case InputTypes::Mouse:
 		if (Value >= SDL_BUTTON_LEFT && Value <= SDL_BUTTON_X2)

@@ -561,7 +561,7 @@ void pb::InputUp(GameInput input)
 	}
 }
 
-void pb::InputDown(GameInput input)
+void pb::InputDown(GameInput input, int keyboardKeycode)
 {
 	if (options::WaitingForInput())
 	{
@@ -583,8 +583,10 @@ void pb::InputDown(GameInput input)
 	CreditsActive = false;
 	IdleTimerMs = 0;
 
+	// Cheat backdoor sequences are typed-character driven, feed the
+	// layout-aware keycode (not the scancode that input.Value)
 	if (input.Type == InputTypes::Keyboard)
-		control::pbctrl_bdoor_controller(static_cast<char>(input.Value));
+		control::pbctrl_bdoor_controller(static_cast<char>(keyboardKeycode));
 
 	for (const auto binding : bindings)
 	{
@@ -617,7 +619,8 @@ void pb::InputDown(GameInput input)
 
 	if (cheat_mode && input.Type == InputTypes::Keyboard)
 	{
-		switch (input.Value)
+		// Switch on the typed character (keycode), not the physical scancode.
+		switch (keyboardKeycode)
 		{
 		case 'b':
 			{

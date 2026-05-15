@@ -69,8 +69,12 @@ public:
 	static void timed_frame(float timeDelta);
 	static void pause_continue();
 	static void loose_focus();
+	// `input.Value` for keyboard inputs is an SDL_Scancode (physical-key).
+	// `keyboardKeycode` is the layout-aware SDL keysym for the same event,
+	// used only for typed-character cheat sequences. Pass 0 for non-keyboard
+	// callers (mouse and gamepad) never feed cheat letters.
 	static void InputUp(GameInput input);
-	static void InputDown(GameInput input);
+	static void InputDown(GameInput input, int keyboardKeycode = 0);
 	static void launch_ball();
 	static void end_game();
 	static void high_scores();

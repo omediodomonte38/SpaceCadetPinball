@@ -1,6 +1,10 @@
 #include "pch.h"
 #include "winmain.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
+#include "high_score.h"
 #include "control.h"
 #include "EmbeddedData.h"
 #include "fullscrn.h"
@@ -17,6 +21,16 @@ constexpr const char* winmain::Version;
 SDL_Window* winmain::MainWindow = nullptr;
 SDL_Renderer* winmain::Renderer = nullptr;
 ImGuiIO* winmain::ImIO = nullptr;
+
+// Session-helper captures. WinMain sets these once, then StartSession and EndSession
+// read them so the native restart loop and the in-callback restart used on
+// Emscripten share one code path.
+static const char* s_lpCmdLine = "";
+static char*       s_basePath = nullptr;
+static char*       s_prefPath = nullptr;
+static bool        s_mixOpened = false;
+static bool        s_resetAllOptions = false;
+static std::string s_iniPath;
 
 int winmain::return_value = 0;
 bool winmain::bQuit = false;
@@ -64,6 +78,11 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 
 	// SDL init
 	SDL_SetMainReady();
+	// Disable SDL's touch<->mouse synthesis. Our shell already dispatches
+	// touches as either game-action keys or as synthetic mouse clicks
+	// (for menu and modal regions), so without this every touch would fire both.
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+	SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
 	if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO | SDL_INIT_VIDEO |
 		SDL_INIT_EVENTS | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) < 0)
 	{
@@ -90,7 +109,14 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 
 	// If HW fails, fallback to SW SDL renderer.
 	SDL_Renderer* renderer = nullptr;
+	// Emscripten's opengles2 backend in SDL 2.32 fails to compile its internal
+	// shader on WebGL ("GL_OES_EGL_image_external extension is not supported"),
+	// so HW renders black. SW is reliable and fast enough for this game.
+#ifdef __EMSCRIPTEN__
+	auto swOffset = 1;
+#else
 	auto swOffset = strstr(lpCmdLine, "-sw") != nullptr ? 1 : 0;
+#endif
 	for (int i = swOffset; i < 2 && !renderer; i++)
 	{
 		Renderer = renderer = SDL_CreateRenderer
@@ -111,18 +137,22 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
 
-	auto prefPath = SDL_GetPrefPath("", "SpaceCadetPinball");
-	auto basePath = SDL_GetBasePath();
+	s_prefPath = SDL_GetPrefPath("", "SpaceCadetPinball");
+	s_basePath = SDL_GetBasePath();
 
 	// SDL mixer init
 	bool mixOpened = false, noAudio = strstr(lpCmdLine, "-noaudio") != nullptr;
 	if (!noAudio)
 	{
+#ifndef MUSIC_TSF
+		// With MUSIC_TSF, MIDI is synthesized by TinySoundFont, so SDL_mixer's
+		// MIDI backend is not needed
 		if ((Mix_Init(MIX_INIT_MID_Proxy) & MIX_INIT_MID_Proxy) == 0)
 		{
 			printf("Could not initialize SDL MIDI, music might not work.\nSDL Error: %s\n", SDL_GetError());
 			SDL_ClearError();
 		}
+#endif
 		if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, 2, 1024) != 0)
 		{
 			printf("Could not open audio device, continuing without audio.\nSDL Error: %s\n", SDL_GetError());
@@ -131,6 +161,8 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 		else
 			mixOpened = true;
 	}
+	s_mixOpened = mixOpened;
+	s_lpCmdLine = lpCmdLine;
 
 	{
 		// Load SDL Game Controller definitions from DB
@@ -149,130 +181,19 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 		}
 	}
 
-	auto resetAllOptions = strstr(lpCmdLine, "-reset") != nullptr;
+	s_resetAllOptions = strstr(lpCmdLine, "-reset") != nullptr;
+
+	// Native: do { Start -> MainLoop -> End } while (restart). On Emscripten
+	// MainLoop() never returns (the rAF loop unwinds C++ via simulate_infinite
+	// _loop=1), so the do-while degenerates to a single iteration and the
+	// in-callback restart path inside MainLoopIteration takes over.
 	do
 	{
 		restart = false;
-
-		// ImGui init
-		IMGUI_CHECKVERSION();
-		ImGui::CreateContext();
-		ImGuiIO& io = ImGui::GetIO();
-		ImIO = &io;
-		auto iniPath = std::string(prefPath) + "imgui_pb.ini";
-		io.IniFilename = iniPath.c_str();
-
-		// First option initialization step: just load settings from .ini. Needs ImGui context.
-		options::InitPrimary();
-		if (resetAllOptions)
-		{
-			resetAllOptions = false;
-			options::ResetAllOptions();
-		}
-
-		if (!Options.FontFileName.V.empty())
-		{
-			ImVector<ImWchar> ranges;
-			translations::GetGlyphRange(&ranges);
-			ImFontConfig fontConfig{};
-
-			// ToDo: further tweak font options, maybe try imgui_freetype
-			fontConfig.OversampleV = 2;
-			fontConfig.OversampleH = 4;
-
-			// ToDo: improve font file test, checking if file exists is not enough
-			auto fontLoaded = false;
-			auto fileName = Options.FontFileName.V.c_str();
-			auto fileHandle = fopenu(fileName, "rb");
-			if (fileHandle)
-			{
-				fclose(fileHandle);
-
-				// ToDo: Bind font size to UI scale
-				if (io.Fonts->AddFontFromFileTTF(fileName, 13.f, &fontConfig, ranges.Data))
-					fontLoaded = true;
-			}
-
-			if (!fontLoaded)
-				printf("Failed to load font: %s, using embedded font.\n", fileName);
-			io.Fonts->Build();
-		}
-		ImGui_Render_Init(renderer);
-		ImGui::StyleColorsDark();
-
-		ImGui_ImplSDL2_InitForSDLRenderer(window, Renderer);
-		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
-
-		// Data search order: WD, executable path, user pref path, platform specific paths.
-		std::vector<const char*> searchPaths
-		{
-			{
-				"",
-				basePath,
-				prefPath
-			}
-		};
-		searchPaths.insert(searchPaths.end(), std::begin(PlatformDataPaths), std::end(PlatformDataPaths));
-		pb::SelectDatFile(searchPaths);
-
-		// Second step: run updates that depend on .DAT file selection
-		options::InitSecondary();
-
-		Sound::Init(mixOpened, Options.SoundChannels, Options.Sounds, Options.SoundVolume);
-		if (!mixOpened)
-			Options.Sounds = false;
-
-		if (!midi::music_init(mixOpened, Options.MusicVolume))
-			Options.Music = false;
-
-		if (pb::init())
-		{
-			std::string message = "The .dat file is missing.\n"
-				"Make sure that the game data is present in any of the following locations:\n";
-			for (auto path : searchPaths)
-			{
-				if (path)
-				{
-					message = message + (path[0] ? path : "working directory") + "\n";
-				}
-			}
-			pb::ShowMessageBox(SDL_MESSAGEBOX_ERROR, "Could not load game data", message.c_str());
-			return 1;
-		}
-
-		fullscrn::init();
-
-		pb::reset_table();
-		pb::firsttime_setup();
-
-		if (strstr(lpCmdLine, "-fullscreen"))
-		{
-			Options.FullScreen = true;
-		}
-
-		if (!Options.FullScreen)
-		{
-			auto resInfo = &fullscrn::resolution_array[fullscrn::GetResolution()];
-			SDL_SetWindowSize(MainWindow, resInfo->TableWidth, resInfo->TableHeight);
-		}
-		SDL_ShowWindow(window);
-		fullscrn::set_screen_mode(Options.FullScreen);
-
-		if (strstr(lpCmdLine, "-demo"))
-			pb::toggle_demo();
-		else
-			pb::replay_level(false);
-
+		if (auto err = StartSession())
+			return err;
 		MainLoop();
-
-		options::uninit();
-		midi::music_shutdown();
-		Sound::Close();
-		pb::uninit();
-
-		ImGui_Render_Shutdown();
-		ImGui_ImplSDL2_Shutdown();
-		ImGui::DestroyContext();
+		EndSession();
 	}
 	while (restart);
 
@@ -283,8 +204,8 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 		Mix_Quit();
 	}
 
-	SDL_free(basePath);
-	SDL_free(prefPath);
+	SDL_free(s_basePath);
+	SDL_free(s_prefPath);
 	SDL_DestroyRenderer(renderer);
 	SDL_DestroyWindow(window);
 	SDL_Quit();
@@ -292,16 +213,390 @@ int winmain::WinMain(LPCSTR lpCmdLine)
 	return return_value;
 }
 
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE void web_flush_persistence()
+{
+	winmain::WebFlushPersistence();
+}
+
+// Web touch path. JS dispatches a GameBindings action, we look up the user's
+// first keyboard binding for it and push a synthetic SDL_KEYDOWN/UP so the
+// normal scancode → pb::InputDown → HandleGameBinding pipeline runs.
+static SDL_Scancode FirstKeyboardScancode(GameBindings action)
+{
+	if (action < GameBindings::Min || action >= GameBindings::Max)
+		return SDL_SCANCODE_UNKNOWN;
+	auto& opt = options::Options.Key[static_cast<int>(action)];
+	for (int i = 0; i < 3; ++i)
+	{
+		if (opt.Inputs[i].Type == InputTypes::Keyboard && opt.Inputs[i].Value != 0)
+			return static_cast<SDL_Scancode>(opt.Inputs[i].Value);
+	}
+	return SDL_SCANCODE_UNKNOWN;
+}
+
+static void PushSynthKeyEvent(uint32_t type, SDL_Scancode sc)
+{
+	if (sc == SDL_SCANCODE_UNKNOWN) return;
+	SDL_Event ev{};
+	ev.type = type;
+	ev.key.timestamp = SDL_GetTicks();
+	ev.key.state = (type == SDL_KEYDOWN) ? SDL_PRESSED : SDL_RELEASED;
+	ev.key.repeat = 0;
+	ev.key.keysym.scancode = sc;
+	ev.key.keysym.sym = SDL_GetKeyFromScancode(sc);
+	SDL_PushEvent(&ev);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void web_touch_down(int actionId)
+{
+	// First touch dismisses the one-shot tutorial overlay
+	if (options::Options.ShowTouchHints)
+		options::Options.ShowTouchHints = false;
+	PushSynthKeyEvent(SDL_KEYDOWN, FirstKeyboardScancode(static_cast<GameBindings>(actionId)));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void web_touch_up(int actionId)
+{
+	PushSynthKeyEvent(SDL_KEYUP,   FirstKeyboardScancode(static_cast<GameBindings>(actionId)));
+}
+
+// the JS touch handler asks the routing helpers to decide
+// whether a given touch should fire a game action (flipper/plunger) or
+// be treated as a UI click (menu bar, modal buttons).
+extern "C" EMSCRIPTEN_KEEPALIVE int web_menu_bar_height()
+{
+	return options::Options.ShowMenu ? winmain::MainMenuHeight : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int web_modal_open()
+{
+	return ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ? 1 : 0;
+}
+
+// Motion must precede the button event so ImGui's hover state lands on the
+// right widget before the click.
+static void PushSynthMouseAt(uint32_t type, int x, int y)
+{
+	SDL_Event motion{};
+	motion.type = SDL_MOUSEMOTION;
+	motion.motion.timestamp = SDL_GetTicks();
+	motion.motion.x = x;
+	motion.motion.y = y;
+	SDL_PushEvent(&motion);
+
+	SDL_Event btn{};
+	btn.type = type;
+	btn.button.timestamp = SDL_GetTicks();
+	btn.button.button = SDL_BUTTON_LEFT;
+	btn.button.state = (type == SDL_MOUSEBUTTONDOWN) ? SDL_PRESSED : SDL_RELEASED;
+	btn.button.clicks = 1;
+	btn.button.x = x;
+	btn.button.y = y;
+	SDL_PushEvent(&btn);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void web_pointer_down(int x, int y)
+{
+	PushSynthMouseAt(SDL_MOUSEBUTTONDOWN, x, y);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void web_pointer_up(int x, int y)
+{
+	PushSynthMouseAt(SDL_MOUSEBUTTONUP, x, y);
+}
+
+// Touch-hint overlay: faint translucent regions over the canvas showing
+// where to tap for flippers / plunger. Called from RenderUi. Auto-hides
+// after FadeSeconds, and gets dismissed instantly by the first touch
+static bool ClientIsCoarsePointer()
+{
+	static int cached = -1; // -1 = not checked, 0 = false, 1 = true
+	if (cached < 0)
+		cached = EM_ASM_INT({
+			return (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ? 1 : 0;
+		});
+	return cached == 1;
+}
+
+static void RenderTouchHints()
+{
+	if (!ClientIsCoarsePointer())
+		return;
+
+	using winmainClock = winmain::Clock;
+	static auto firstShown = winmainClock::now();
+	static bool initialized = false;
+	if (!initialized) { firstShown = winmainClock::now(); initialized = true; }
+	const auto elapsed = std::chrono::duration<float>(winmainClock::now() - firstShown).count();
+	constexpr float FadeSeconds  = 7.0f;
+	constexpr float FadeOutStart = 5.0f;
+	if (elapsed >= FadeSeconds)
+	{
+		// Time-out: persist the dismiss the same way a touch would.
+		options::Options.ShowTouchHints = false;
+		return;
+	}
+	float alpha = 1.0f;
+	if (elapsed > FadeOutStart)
+		alpha = 1.0f - (elapsed - FadeOutStart) / (FadeSeconds - FadeOutStart);
+
+	auto* dl = ImGui::GetForegroundDrawList();
+	const ImVec2 size = ImGui::GetIO().DisplaySize;
+	const float W = size.x, H = size.y;
+
+	auto rgba = [alpha](float a) {
+		return IM_COL32(255, 255, 255, static_cast<int>(a * alpha * 255));
+	};
+	const ImU32 fill   = rgba(0.10f);
+	const ImU32 border = rgba(0.40f);
+	const ImU32 text   = rgba(0.95f);
+
+	// Same regions as actionForTouch() in emscripten_shell.html. Keep them
+	// in sync if either is changed.
+	const float plungerX0 = 0.30f * W, plungerX1 = 0.70f * W;
+	const float plungerY0 = 0.80f * H;
+	const float leftX0 = 0.00f, leftX1 = 0.50f * W;
+	const float rightX0 = 0.50f * W, rightX1 = W;
+	const float flipperY0 = 0.55f * H; // visual hint only, touch is whole half
+
+	auto label = [&](const char* s, ImVec2 center) {
+		const ImVec2 ts = ImGui::CalcTextSize(s);
+		dl->AddText(ImVec2(center.x - ts.x * 0.5f, center.y - ts.y * 0.5f), text, s);
+	};
+
+	// Left flipper
+	dl->AddRectFilled(ImVec2(leftX0, flipperY0), ImVec2(leftX1, H), fill, 8.0f);
+	dl->AddRect      (ImVec2(leftX0, flipperY0), ImVec2(leftX1, H), border, 8.0f, 0, 2.0f);
+	label("Left Flipper", ImVec2((leftX0 + leftX1) * 0.5f, (flipperY0 + H) * 0.5f));
+
+	// Right flipper
+	dl->AddRectFilled(ImVec2(rightX0, flipperY0), ImVec2(rightX1, H), fill, 8.0f);
+	dl->AddRect      (ImVec2(rightX0, flipperY0), ImVec2(rightX1, H), border, 8.0f, 0, 2.0f);
+	label("Right Flipper", ImVec2((rightX0 + rightX1) * 0.5f, (flipperY0 + H) * 0.5f));
+
+	// Plunger band (drawn on top of the flipper halves)
+	dl->AddRectFilled(ImVec2(plungerX0, plungerY0), ImVec2(plungerX1, H), fill, 8.0f);
+	dl->AddRect      (ImVec2(plungerX0, plungerY0), ImVec2(plungerX1, H), border, 8.0f, 0, 2.0f);
+	label("Hold to pull plunger", ImVec2((plungerX0 + plungerX1) * 0.5f, (plungerY0 + H) * 0.5f));
+
+	// Caption near the top. ASCII only, since ProggyClean (default ImGui font) has
+	// no em-dash glyph.
+	const char* caption = "Touch to play, hints will fade";
+	const ImVec2 ts = ImGui::CalcTextSize(caption);
+	dl->AddText(ImVec2((W - ts.x) * 0.5f, H * 0.06f), text, caption);
+}
+void winmain::WebFlushPersistence()
+{
+	// Eagerly push state to disk: native does this at quit via pb::uninit /
+	// options::uninit, but on the web the user just closes the tab.
+	options::uninit();
+	high_score::write();
+	if (ImIO && ImIO->IniFilename)
+		ImGui::SaveIniSettingsToDisk(ImIO->IniFilename);
+	EM_ASM({
+		if (Module.FS)
+			Module.FS.syncfs(false, function (err) {
+				if (err) console.error('IDBFS flush failed:', err);
+			});
+	});
+}
+#endif
+
+int winmain::StartSession()
+{
+	restart = false;
+
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	ImIO = &io;
+	// s_iniPath is a file-static so io.IniFilename keeps a stable pointer
+	// across the lifetime of the ImGui context.
+	s_iniPath = std::string(s_prefPath) + "imgui_pb.ini";
+	io.IniFilename = s_iniPath.c_str();
+
+	// First option initialization step: just load settings from .ini. Needs ImGui context.
+	options::InitPrimary();
+	if (s_resetAllOptions)
+	{
+		s_resetAllOptions = false;
+		options::ResetAllOptions();
+	}
+
+	if (!Options.FontFileName.V.empty())
+	{
+		ImVector<ImWchar> ranges;
+		translations::GetGlyphRange(&ranges);
+		ImFontConfig fontConfig{};
+
+		fontConfig.OversampleV = 2;
+		fontConfig.OversampleH = 4;
+
+		auto fontLoaded = false;
+		auto fileName = Options.FontFileName.V.c_str();
+		auto fileHandle = fopenu(fileName, "rb");
+		if (fileHandle)
+		{
+			fclose(fileHandle);
+			if (io.Fonts->AddFontFromFileTTF(fileName, 13.f, &fontConfig, ranges.Data))
+				fontLoaded = true;
+		}
+
+		if (!fontLoaded)
+			printf("Failed to load font: %s, using embedded font.\n", fileName);
+		io.Fonts->Build();
+	}
+	ImGui_Render_Init(Renderer);
+	ImGui::StyleColorsDark();
+
+	ImGui_ImplSDL2_InitForSDLRenderer(MainWindow, Renderer);
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+
+#ifdef __EMSCRIPTEN__
+	// ?table=ft|3dpb URL override, applied once per page load before .dat
+	// selection. Gated by s_overrideApplied so a later in-menu toggle
+	// (which writes Prefer3DPBGameData to the ini) wins on subsequent
+	// Restart()s.
+	{
+		static bool s_overrideApplied = false;
+		if (!s_overrideApplied)
+		{
+			s_overrideApplied = true;
+			int override_v = EM_ASM_INT({
+				return (typeof window.__pinball_table_override === 'number')
+				        ? window.__pinball_table_override : -1;
+			});
+			if (override_v == 0 || override_v == 1)
+			{
+				Options.Prefer3DPBGameData = (override_v == 1);
+				Options.Resolution = -1; // boot at the chosen table's native max
+				printf("URL ?table= override: %s\n", override_v ? "3D Pinball" : "Full Tilt");
+			}
+		}
+	}
+#endif
+
+	// Data search order: WD, executable path, user pref path, platform specific paths.
+	std::vector<const char*> searchPaths{{"", s_basePath, s_prefPath}};
+	searchPaths.insert(searchPaths.end(), std::begin(PlatformDataPaths), std::end(PlatformDataPaths));
+	pb::SelectDatFile(searchPaths);
+
+	// Second step: run updates that depend on .DAT file selection
+	options::InitSecondary();
+
+	Sound::Init(s_mixOpened, Options.SoundChannels, Options.Sounds, Options.SoundVolume);
+	if (!s_mixOpened)
+		Options.Sounds = false;
+
+	if (!midi::music_init(s_mixOpened, Options.MusicVolume))
+		Options.Music = false;
+
+	if (pb::init())
+	{
+		std::string message = "The .dat file is missing.\n"
+			"Make sure that the game data is present in any of the following locations:\n";
+		for (auto path : searchPaths)
+		{
+			if (path)
+				message = message + (path[0] ? path : "working directory") + "\n";
+		}
+		pb::ShowMessageBox(SDL_MESSAGEBOX_ERROR, "Could not load game data", message.c_str());
+		return 1;
+	}
+
+	fullscrn::init();
+
+	pb::reset_table();
+	pb::firsttime_setup();
+
+	if (strstr(s_lpCmdLine, "-fullscreen"))
+		Options.FullScreen = true;
+
+	if (!Options.FullScreen)
+	{
+		auto resInfo = &fullscrn::resolution_array[fullscrn::GetResolution()];
+		SDL_SetWindowSize(MainWindow, resInfo->TableWidth, resInfo->TableHeight);
+	}
+	SDL_ShowWindow(MainWindow);
+	fullscrn::set_screen_mode(Options.FullScreen);
+
+	if (strstr(s_lpCmdLine, "-demo"))
+		pb::toggle_demo();
+	else
+		pb::replay_level(false);
+
+	return 0;
+}
+
+void winmain::EndSession()
+{
+	options::uninit();
+	midi::music_shutdown();
+	Sound::Close();
+	pb::uninit();
+
+	ImGui_Render_Shutdown();
+	ImGui_ImplSDL2_Shutdown();
+	ImGui::DestroyContext();
+	ImIO = nullptr;
+}
+
+static unsigned ml_updateCounter, ml_frameCounter;
+static winmain::TimePoint ml_frameStart, ml_prevTime;
+static double ml_UpdateToFrameCounter;
+static winmain::DurationMs ml_sleepRemainder, ml_frameDuration;
+#ifdef __EMSCRIPTEN__
+// Unspent real time carried between browser frames, fed to the fixed-timestep
+// physics stepper so collisions resolve at a constant rate (see MainLoopIteration).
+static double ml_physicsAccumulator;
+// Wall-clock of last IDBFS flush. We push state every few seconds so a tab
+// close doesn't lose progress.
+static winmain::TimePoint ml_lastPersistFlush;
+#endif
+
 void winmain::MainLoop()
 {
 	bQuit = false;
-	unsigned updateCounter = 0, frameCounter = 0;
-	auto frameStart = Clock::now();
-	double UpdateToFrameCounter = 0;
-	DurationMs sleepRemainder(0), frameDuration(TargetFrameTime);
-	auto prevTime = frameStart;
+	ml_updateCounter = 0;
+	ml_frameCounter = 0;
+	ml_frameStart = Clock::now();
+	ml_UpdateToFrameCounter = 0;
+	ml_sleepRemainder = DurationMs(0);
+	ml_frameDuration = TargetFrameTime;
+	ml_prevTime = ml_frameStart;
+#ifdef __EMSCRIPTEN__
+	ml_physicsAccumulator = 0;
+	ml_lastPersistFlush = Clock::now();
+#endif
 
-	while (true)
+#ifdef __EMSCRIPTEN__
+	// 0 fps = browser drives via requestAnimationFrame.
+	// simulate_infinite_loop=1 unwinds main() and yields control to the browser.
+	emscripten_set_main_loop(MainLoopIteration, 0, 1);
+#else
+	while (!bQuit)
+		MainLoopIteration();
+
+	if (PrevSdlErrorCount > 0)
+		printf("SDL Error: ^ Previous Error Repeated %u Times\n", PrevSdlErrorCount);
+#endif
+}
+
+void winmain::MainLoopIteration()
+{
+	auto& updateCounter        = ml_updateCounter;
+	auto& frameCounter         = ml_frameCounter;
+	auto& frameStart           = ml_frameStart;
+	auto& prevTime             = ml_prevTime;
+	auto& frameDuration        = ml_frameDuration;
+#ifndef __EMSCRIPTEN__
+	// Native-only pacing state. The Emscripten path is rAF-paced (no sleep)
+	// and renders every callback, so it needs neither of these.
+	auto& UpdateToFrameCounter = ml_UpdateToFrameCounter;
+	auto& sleepRemainder       = ml_sleepRemainder;
+#endif
+
 	{
 		if (DispFrameRate)
 		{
@@ -320,7 +615,43 @@ void winmain::MainLoop()
 		}
 
 		if (!ProcessWindowMessages() || bQuit)
-			break;
+		{
+#ifdef __EMSCRIPTEN__
+			// On native, bQuit drops out of MainLoop() and the do-while in
+			// WinMain handles restart vs exit. On web that loop can't unwind,
+			// so restart is serviced inline: tear the session down, spin a
+			// fresh one, and keep the rAF callback alive.
+			if (restart)
+			{
+				EndSession();
+				bQuit = false;
+				StartSession();
+				return;
+			}
+			emscripten_cancel_main_loop();
+#endif
+			return;
+		}
+
+#ifdef __EMSCRIPTEN__
+		// Browser canvas has no real focus or minimised distinction. Force it
+		// true so the game runs without needing a focus click. If
+		// the tab is hidden, drop into a pause: skip physics + audio
+		// and return early. This keeps a backgrounded tab off the CPU /
+		// battery. rAF already throttles to ~1 Hz when hidden
+		const bool tabVisible = EM_ASM_INT({ return document.hidden ? 0 : 1; });
+		has_focus = tabVisible;
+		if (!tabVisible)
+		{
+			// Reset frame timing so the next visible frame doesn't get a
+			// huge dt (which would spike the physics accumulator and affect
+			//gameplay)
+			frameStart = Clock::now();
+			frameDuration = TargetFrameTime;
+			ml_physicsAccumulator = 0.0;
+			return;
+		}
+#endif
 
 		if (has_focus)
 		{
@@ -353,6 +684,39 @@ void winmain::MainLoop()
 			}
 			if (!single_step && !no_time_loss)
 			{
+#ifdef __EMSCRIPTEN__
+				// The browser drives this loop at the display refresh rate, but
+				// the physics is tuned for Options.UpdatesPerSecond. Step it at
+				// the fixed TargetFrameTime, consuming whatever real time
+				// elapsed, so a resting ball sees the same per-tick gravity and
+				// collision response it would on the native build. Without this
+				// resting balls micro-bounce.
+				const double fixedStep = TargetFrameTime.count();
+				ml_physicsAccumulator += frameDuration.count();
+				int physicsSteps = 0;
+				while (ml_physicsAccumulator >= fixedStep && physicsSteps < 8)
+				{
+					pb::frame(static_cast<float>(fixedStep));
+					ml_physicsAccumulator -= fixedStep;
+					physicsSteps++;
+					updateCounter++;
+				}
+				// Fell behind (long stall), so drop the backlog instead of
+				// triggering a spiral-of-death catch-up.
+				if (physicsSteps == 8)
+					ml_physicsAccumulator = 0.0;
+				if (DispGRhistory)
+				{
+					auto targetSize = static_cast<unsigned>(static_cast<float>(Options.UpdatesPerSecond) * gfrWindow);
+					if (gfrDisplay.size() != targetSize)
+					{
+						gfrDisplay.resize(targetSize, static_cast<float>(TargetFrameTime.count()));
+						gfrOffset = 0;
+					}
+					gfrDisplay[gfrOffset] = static_cast<float>(fixedStep);
+					gfrOffset = (gfrOffset + 1) % gfrDisplay.size();
+				}
+#else
 				auto dt = static_cast<float>(frameDuration.count());
 				pb::frame(dt);
 				if (DispGRhistory)
@@ -367,11 +731,18 @@ void winmain::MainLoop()
 					gfrOffset = (gfrOffset + 1) % gfrDisplay.size();
 				}
 				updateCounter++;
+#endif
 			}
 			no_time_loss = false;
 
+			// the browser already paces us at the display rate, so
+			// render every callback
+#ifdef __EMSCRIPTEN__
+			{
+#else
 			if (UpdateToFrameCounter >= UpdateToFrameRatio)
 			{
+#endif
 				if (Options.HideCursor && CursorIdleCounter <= 0)
 					ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 				ImGui_ImplSDL2_NewFrame();
@@ -390,7 +761,9 @@ void winmain::MainLoop()
 
 				SDL_RenderPresent(Renderer);
 				frameCounter++;
+#ifndef __EMSCRIPTEN__
 				UpdateToFrameCounter -= UpdateToFrameRatio;
+#endif
 			}
 
 			auto sdlError = SDL_GetError();
@@ -418,6 +791,21 @@ void winmain::MainLoop()
 				}
 			}
 
+#ifdef __EMSCRIPTEN__
+			// requestAnimationFrame paces this loop, so never busy-wait.
+			// Measure how much real time elapsed since the previous callback,
+			// the physics stepper above turns it into fixed-size ticks. Clamp
+			// so a long stall (tab backgrounded) can't dump a huge backlog.
+			auto frameEnd = Clock::now();
+			frameDuration = std::min<DurationMs>(DurationMs(frameEnd - frameStart), DurationMs(100));
+			frameStart = frameEnd;
+
+			if (DurationMs(frameEnd - ml_lastPersistFlush) >= DurationMs(5000))
+			{
+				ml_lastPersistFlush = frameEnd;
+				WebFlushPersistence();
+			}
+#else
 			auto updateEnd = Clock::now();
 			auto targetTimeDelta = TargetFrameTime - DurationMs(updateEnd - frameStart) - sleepRemainder;
 
@@ -441,14 +829,10 @@ void winmain::MainLoop()
 			frameDuration = std::min<DurationMs>(DurationMs(frameEnd - frameStart), 2 * TargetFrameTime);
 			frameStart = frameEnd;
 			UpdateToFrameCounter++;
+#endif
 
 			CursorIdleCounter = std::max(CursorIdleCounter - static_cast<int>(frameDuration.count()), 0);
 		}
-	}
-
-	if (PrevSdlErrorCount > 0)
-	{
-		printf("SDL Error: ^ Previous Error Repeated %u Times\n", PrevSdlErrorCount);
 	}
 }
 
@@ -694,19 +1078,33 @@ void winmain::RenderUi()
 				ImGui::EndMenu();
 			}
 
-			if (ImGui::BeginMenu("Game Data"))
-			{
-				if (ImGui::MenuItem("Prefer 3DPB Data", nullptr, Options.Prefer3DPBGameData))
-				{
-					options::toggle(Menu1::Prefer3DPBGameData);
-				}
-				ImGui::EndMenu();
-			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Reset All Options"))
 			{
 				options::ResetAllOptions();
 				Restart();
+			}
+			ImGui::EndMenu();
+		}
+
+		// Top-level "Table" menu, lets the user switch between the two
+		// bundled pinball tables at a glance. The underlying option
+		// (Prefer3DPBGameData) just biases the .DAT search order: false →
+		// CADET.DAT first (Full Tilt), true → PINBALL.DAT first (3DPB).
+		// Restart happens via options::toggle. The rAF callback re-runs
+		// session lifecycle inline.
+		if (ImGui::BeginMenu("Table"))
+		{
+			const bool useFt   = !Options.Prefer3DPBGameData;
+			const bool use3dpb =  Options.Prefer3DPBGameData;
+
+			if (ImGui::MenuItem("Full Tilt - Space Cadet", nullptr, useFt))
+			{
+				if (!useFt) options::toggle(Menu1::Prefer3DPBGameData);
+			}
+			if (ImGui::MenuItem("3D Pinball (Microsoft Plus!)", nullptr, use3dpb))
+			{
+				if (!use3dpb) options::toggle(Menu1::Prefer3DPBGameData);
 			}
 			ImGui::EndMenu();
 		}
@@ -788,6 +1186,12 @@ void winmain::RenderUi()
 				ImGui::EndMenu();
 		ImGui::EndMainMenuBar();
 	}
+
+#ifdef __EMSCRIPTEN__
+	// One-shot touch tutorial, see RenderTouchHints definition below.
+	if (Options.ShowTouchHints)
+		RenderTouchHints();
+#endif
 
 	a_dialog();
 	high_score::RenderHighScoreDialog();
@@ -897,13 +1301,15 @@ int winmain::event_handler(const SDL_Event* event)
 		return_value = 0;
 		return 0;
 	case SDL_KEYUP:
-		pb::InputUp({InputTypes::Keyboard, event->key.keysym.sym});
+		// Use scancode (physical key) so bindings work on non-US layouts.
+		pb::InputUp({InputTypes::Keyboard, event->key.keysym.scancode});
 		break;
 	case SDL_KEYDOWN:
 		if (event->key.repeat)
 			break;
 
-		pb::InputDown({InputTypes::Keyboard, event->key.keysym.sym});
+		// Bind on scancode, and pass keysym separately for typed-letter cheats.
+		pb::InputDown({InputTypes::Keyboard, event->key.keysym.scancode}, event->key.keysym.sym);
 		if (!pb::cheat_mode)
 			break;
 
@@ -1052,8 +1458,14 @@ int winmain::ProcessWindowMessages()
 {
 	static auto idleWait = 0;
 	SDL_Event event;
+#ifdef __EMSCRIPTEN__
+	// On the web, the canvas is always "shown", there's no minimised state,
+	// and SDL_WaitEventTimeout would block the browser thread. Always poll.
+	{
+#else
 	if (has_focus)
 	{
+#endif
 		idleWait = static_cast<int>(TargetFrameTime.count());
 		while (SDL_PollEvent(&event))
 		{
@@ -1106,11 +1518,26 @@ void winmain::a_dialog()
 
 				ImGui::TextUnformatted("Decompiled -> Ported to SDL");
 				ImGui::Text("Version %s", Version);
-				if (ImGui::SmallButton("Project home: https://github.com/k4zmu2a/SpaceCadetPinball"))
+				if (ImGui::SmallButton("Upstream decomp: https://github.com/k4zmu2a/SpaceCadetPinball"))
 				{
 #if SDL_VERSION_ATLEAST(2, 0, 14)
-					// Relatively new feature, skip with older SDL
 					SDL_OpenURL("https://github.com/k4zmu2a/SpaceCadetPinball");
+#endif
+				}
+				ImGui::Separator();
+				ImGui::TextUnformatted("This web build is based on both the original");
+				ImGui::TextUnformatted("decomp and the alula Emscripten fork.");
+				if (ImGui::SmallButton("alula fork: https://github.com/alula/SpaceCadetPinball"))
+				{
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+					SDL_OpenURL("https://github.com/alula/SpaceCadetPinball");
+#endif
+				}
+				ImGui::TextUnformatted("Source code hosted on:");
+				if (ImGui::SmallButton("https://github.com/omediodomonte38/SpaceCadetPinball"))
+				{
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+					SDL_OpenURL("https://github.com/omediodomonte38/SpaceCadetPinball");
 #endif
 				}
 				ImGui::EndTabItem();
