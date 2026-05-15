@@ -1,8 +1,8 @@
 #pragma once
 
 #ifdef MUSIC_TSF
-// SDL_mixer has no MIDI backend under Emscripten,
-// so a "track" here is the parsed event list
+// TinySoundFont path: synthesize MIDI in-process. SDL_mixer has no MIDI
+// backend under Emscripten, so a "track" here is the parsed event list
 // (tml_message*) rather than a Mix_Music.
 #include "tml.h"
 #include "tsf.h"

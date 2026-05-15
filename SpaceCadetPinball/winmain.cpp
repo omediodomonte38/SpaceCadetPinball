@@ -306,6 +306,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE void web_pointer_up(int x, int y)
 	PushSynthMouseAt(SDL_MOUSEBUTTONUP, x, y);
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void web_pointer_motion(int x, int y)
+{
+	SDL_Event ev{};
+	ev.type = SDL_MOUSEMOTION;
+	ev.motion.timestamp = SDL_GetTicks();
+	ev.motion.x = x;
+	ev.motion.y = y;
+	SDL_PushEvent(&ev);
+}
+
 // Touch-hint overlay: faint translucent regions over the canvas showing
 // where to tap for flippers / plunger. Called from RenderUi. Auto-hides
 // after FadeSeconds, and gets dismissed instantly by the first touch

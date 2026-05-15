@@ -219,7 +219,7 @@ if(WIN32)
     list(APPEND SOURCE_FILES SpaceCadetPinball/SpaceCadetPinball.rc)
 endif(WIN32)
 
-# TinySoundFont MIDI synth
+# TinySoundFont MIDI synth (header-only tsf.h/tml.h, compiled via tsf.cpp).
 if(MUSIC_TSF)
     list(APPEND SOURCE_FILES
             SpaceCadetPinball/tsf.cpp
@@ -264,7 +264,7 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Emscripten")
     set_target_properties(SpaceCadetPinball PROPERTIES LINK_FLAGS
         "-s ALLOW_MEMORY_GROWTH=1 -s FORCE_FILESYSTEM=1 \
         -s EXPORTED_RUNTIME_METHODS=FS,IDBFS,addRunDependency,removeRunDependency \
-        -s EXPORTED_FUNCTIONS=_main,_web_flush_persistence,_web_touch_down,_web_touch_up,_web_pointer_down,_web_pointer_up,_web_menu_bar_height,_web_modal_open \
+        -s EXPORTED_FUNCTIONS=_main,_web_flush_persistence,_web_touch_down,_web_touch_up,_web_pointer_down,_web_pointer_up,_web_pointer_motion,_web_menu_bar_height,_web_modal_open \
         -Oz \
         --shell-file ${CMAKE_CURRENT_SOURCE_DIR}/SpaceCadetPinball/emscripten_shell.html \
         --preload-file ${CMAKE_CURRENT_SOURCE_DIR}/game_resources@game_resources")

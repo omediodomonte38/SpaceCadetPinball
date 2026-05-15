@@ -39,11 +39,10 @@
         background: #000;
         image-rendering: pixelated;
         image-rendering: crisp-edges;
-        /* Fill the viewport, but let object-fit keep the canvas's intrinsic
-           aspect ratio. Without object-fit the previous rules (max-width
-           100vw + height 100vh) caused vertical stretching on portrait
-           phones whenever the canvas's intrinsic width exceeded the
-           viewport width (common with the 1024x768 Full Tilt table). */
+        /* Fill the viewport while preserving the canvas intrinsic aspect
+           via object-fit. JS intercepts mouse events and forwards them
+           to SDL in game coordinates (see below), so the letterbox bars
+           the element gets sized over don't break menu hit-testing. */
         width: 100vw;
         height: 100vh;
         object-fit: contain;
@@ -329,6 +328,37 @@
                     }
                 }
             });
+            // Mouse intercept. The canvas fills the viewport via object-fit
+            // and the game is letterboxed inside the element, so SDL's own
+            // mouse coords (CSS-pixels divided by element size) land in the
+            // black bars rather than on the right widget. Capture mouse
+            // events in the capturing phase, convert to game coords with the
+            // same math we use for touch, and forward to SDL via the
+            // _web_pointer_* exports. stopImmediatePropagation keeps SDL's
+            // own handler from firing alongside ours.
+            function mouseToGame(e) {
+                var rect = canvas.getBoundingClientRect();
+                var p = gameCoords(e, rect);
+                var iw = canvasElement.width  || 1;
+                var ih = canvasElement.height || 1;
+                return { x: Math.round(p.x * iw), y: Math.round(p.y * ih) };
+            }
+            canvas.addEventListener('mousedown', function (e) {
+                e.stopImmediatePropagation();
+                var g = mouseToGame(e);
+                if (Module._web_pointer_down) Module._web_pointer_down(g.x, g.y);
+                canvas.focus();
+            }, true);
+            canvas.addEventListener('mouseup', function (e) {
+                e.stopImmediatePropagation();
+                var g = mouseToGame(e);
+                if (Module._web_pointer_up) Module._web_pointer_up(g.x, g.y);
+            }, true);
+            canvas.addEventListener('mousemove', function (e) {
+                e.stopImmediatePropagation();
+                var g = mouseToGame(e);
+                if (Module._web_pointer_motion) Module._web_pointer_motion(g.x, g.y);
+            }, true);
         }]);
         Module.postRun = (Module.postRun || []).concat([function () {
             // Push live game state → ImGui ini → IndexedDB. The C++ side runs
