@@ -65,7 +65,31 @@ Game data is **not** included, but can easily be found on the Internet Archive
 `cadet.dat` (Full Tilt) plus their sound files in `game_resources/` before
 building, they get baked into the `.data` bundle at link time. Full
 Tilt sounds go under `game_resources/sound/`, the 3DPB ones in the root.
-`gm.sf2` is also needed for MIDI playback.
+`gm.sf2` is also needed for MIDI playback. See below for how to generate
+a trimmed version for lower web downloads.
+
+### Generating a trimmed `gm.sf2`
+
+The web build ships a SoundFont so MIDI music can be synthesised without
+relying on the OS. A full General MIDI bank is roughly 3 MB, but the
+bundled tracks (3DPB `pinball.mid` and Full Tilt `taba1/2/3.mds`) only
+use seven instruments. `tools/trim_gm_sf2.py` keeps exactly those, drops
+the rest, and produces a ~600 KB file that sounds identical, thus
+saving several bytes of downloads.
+
+You need any GM-128 SoundFont as input, like the
+copy that ships with the [alula fork](https://github.com/alula/SpaceCadetPinball/blob/master/SpaceCadetPinball/gm.sf2).
+
+```sh
+# Writes to game_resources/gm.sf2 by default.
+python3 tools/trim_gm_sf2.py /path/to/full_gm.sf2
+
+# Or specify an explicit output path.
+python3 tools/trim_gm_sf2.py /path/to/full_gm.sf2 game_resources/gm.sf2
+```
+
+The script reports which presets were kept and the size delta. The output is
+deterministic, the same input always produces the same bytes.
 
 Serve the resulting `bin/` over HTTP:
 
