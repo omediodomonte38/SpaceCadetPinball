@@ -2,122 +2,86 @@
 
 # SpaceCadetPinball
 
-## Summary
+A fork of [k4zmu2a/SpaceCadetPinball](https://github.com/k4zmu2a/SpaceCadetPinball)
+focused on an Emscripten / WebAssembly build, with both the Full Tilt
+`CADET.DAT` and the 3D Pinball `PINBALL.DAT` tables bundled, mobile-friendly
+touch controls, and persistent options + high scores that save in the browser.
 
-Reverse engineering of `3D Pinball for Windows - Space Cadet`, a game bundled with Windows.
+**Play it:** <https://aburro.me/pinball/> (or
+`https://aburro.me/pinball/?table=ft` / `?table=3dpb` for a specific table).
 
-## How to play
+## Why this fork
 
-Place compiled executable into a folder containing original game resources (not included).\
-Supports data files from Windows and Full Tilt versions of the game.
+The right flipper on every existing online port of 3DPB (that I know of) is
+bound to `/`, which on a Spanish keyboard requires `Shift+7`, making the game
+unplayable. This motivated an input rewrite, which then snowballed
+into a proper web build.
 
-## Known source ports
+## What's different from upstream
 
-| Platform           | Author          | URL                                                                                                        |
-| ------------------ | --------------- | ---------------------------------------------------------------------------------------------------------- |
-| PS Vita            | Axiom           | <https://github.com/suicvne/SpaceCadetPinball_Vita>                                                        |
-| Emscripten         | alula           | <https://github.com/alula/SpaceCadetPinball> <br> Play online: <https://alula.github.io/SpaceCadetPinball> |
-| Nintendo Switch    | averne          | <https://github.com/averne/SpaceCadetPinball-NX>                                                           |
-| webOS TV           | mariotaku       | <https://github.com/webosbrew/SpaceCadetPinball>                                                           |
-| Android (WIP)      | Iscle           | https://github.com/Iscle/SpaceCadetPinball                                                                 |
-| Nintendo Wii       | MaikelChan      | https://github.com/MaikelChan/SpaceCadetPinball                                                            |
-| Nintendo 3DS       | MaikelChan      | https://github.com/MaikelChan/SpaceCadetPinball/tree/3ds                                                   |
-| Nintendo DS        | Headshotnoby    | https://github.com/headshot2017/3dpinball-nds                                                              |
-| Nintendo Wii U     | IntriguingTiles | https://github.com/IntriguingTiles/SpaceCadetPinball-WiiU                                                  |
-| PlayStation 2      | Headshotnoby    | https://github.com/headshot2017/3dpinball-ps2                                                              |
-| Sega Dreamcast     | Headshotnoby    | https://github.com/headshot2017/3dpinball-dc                                                               |
-| MorphOS            | BeWorld         | https://www.morphos-storage.net/?id=1688897                                                                |
-| AmigaOS 4          | rjd324          | http://aminet.net/package/game/actio/spacecadetpinball-aos4                                                |
-| Android (WIP)      | fexed           | https://github.com/fexed/Pinball-on-Android                                                                |
+- **International keyboard support.** Bindings are stored as `SDL_Scancode`
+  (physical key position) instead of `SDLK_*` keysyms, so the right flipper
+  works on any layout (at least in theory).
+- **Emscripten / WebAssembly build.** Custom HTML shell with on-page log,
+  splash screen, and a download progress bar (since with both tables the download 
+can be somewhat significant)
+- **Both tables in one build.** Full Tilt (CADET.DAT) and 3D Pinball
+  (PINBALL.DAT) are both bundled. A top-level `Table` menu switches between
+  them at runtime, and `?table=ft|3dpb` URL parameters force a specific
+  table on first load for shareable links.
+- **TinySoundFont MIDI on the web.** SDL_mixer has no MIDI backend under
+  Emscripten, so MIDI playback uses a baked-in GM SoundFont. 
+- **Fixed-timestep physics on the web.** The browser drives the loop at
+  display refresh rate, but the physics is stepped at a fixed 120 Hz via
+  an accumulator. Also includes a resting-contact damping threshold in
+  `maths::basic_collision` that "fixes" (more like dampens) upstream
+  [issue #210](https://github.com/k4zmu2a/SpaceCadetPinball/issues/210) .
+- **Persistent  high scores in the browser**. Using IDBFS, per-table high scores 
+  can be saved for replayability. The high-scores are namespaced so the
+  two tables keep separate leaderboards.
+- **Mobile touch controls (rudimentary).** Tap the left or right half of the
+screen for the flippers, hold the bottom-centre to pull the plunger.
+Menus and dialogs can still be tapped normally.
+- **Mobile sizing.** `object-fit: contain` so the playfield
+  letterboxes instead of stretching on phones.
+- **Hidden-tab pause.** Stops physics and audio when the tab isn't
+  visible, so the game doesn't drain CPU/ battery while in the background.
+- **Web metadata.** Viewport, theme-color, OpenGraph / Twitter
+  card tags, apple-mobile-web-app capability, apple-touch-icon.
 
-Platforms covered by this project: desktop Windows, Linux and macOS.
+## Building the web version
 
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-
-## Source
-
-* `pinball.exe` from `Windows XP` (SHA-1 `2A5B525E0F631BB6107639E2A69DF15986FB0D05`) and its public PDB
-* `CADET.EXE` 32bit version from `Full Tilt! Pinball` (SHA-1 `3F7B5699074B83FD713657CD94671F2156DBEDC4`)
-
-## Tools used
-
-`Ghidra`, `Ida`, `Visual Studio`
-
-## What was done
-
-* All structures were populated, globals and locals named.
-* All subs were decompiled, C pseudo code was converted to compilable C++. Loose (namespace?) subs were assigned to classes.
-
-## Compiling
-
-Project uses `C++11` and depends on `SDL2` libs.
-
-### On Windows
-
-Download and unpack devel packages for `SDL2` and `SDL2_mixer`.\
-Set paths to them in `CMakeLists.txt`, see suggested placement in `/Libs`.\
-Compile with Visual Studio; tested with 2019.
-
-### On Linux
-
-Install devel packages for `SDL2` and `SDL2_mixer`.\
-Compile with CMake; tested with GCC 10, Clang 11.\
-To cross-compile for Windows, install a 64-bit version of mingw and its `SDL2` and `SDL2_mixer` distributions, then use the `mingwcc.cmake` toolchain.
-
-[![Packaging status](https://repology.org/badge/tiny-repos/spacecadetpinball.svg)](https://repology.org/project/spacecadetpinball/versions) 
-
-Some distributions provide a package in their repository. You can use those for easier dependency management and updates.
-
-This project is available as Flatpak on [Flathub](https://flathub.org/apps/details/com.github.k4zmu2a.spacecadetpinball).
-
-### On macOS
-
-Install XCode (or at least Xcode Command Line Tools with `xcode-select --install`) and CMake.
-
-**HomeBrew**
-
-You can easily install the build artifact by using `brew`.
+The build needs `emsdk` (tested with 5.0.7) and Python 3.10+:
 
 ```sh
-brew tap draftbrew/tap
-brew install --no-quarantine space-cadet-pinball
+source /path/to/emsdk/emsdk_env.sh
+cmake -B build-web -DCMAKE_TOOLCHAIN_FILE=$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake
+cmake --build build-web -j
 ```
 
-Be aware that the flag `--no-quarantime` will disable macOS's Gatekeeper during installation.
+Game data is **not** included, but can easily be found on the Internet Archive
+([here](https://archive.org/details/3d-pinball-space-cadet_multi) or [here](https://archive.org/details/full-tilt-pinball-1996-windows))
+. Place `pinball.dat` (3DPB) and / or
+`cadet.dat` (Full Tilt) plus their sound files in `game_resources/` before
+building, they get baked into the `.data` bundle at link time. Full
+Tilt sounds go under `game_resources/sound/`, the 3DPB ones in the root.
+`gm.sf2` is also needed for MIDI playback.
 
-**Manual compilation:**
+Serve the resulting `bin/` over HTTP:
 
-* **Homebrew**: Install the `SDL2`, `SDL2_mixer` homebrew packages.
-* **MacPorts**: Install the `libSDL2`, `libSDL2_mixer` macports packages.
+```sh
+cd bin && python3 -m http.server 8000
+```
 
-Compile with CMake. Ensure that `CMAKE_OSX_ARCHITECTURES` variable is set for either `x86_64` Apple Intel or `arm64` for Apple Silicon.
+Then open <http://localhost:8000/SpaceCadetPinball.html>.
 
-Tested with: macOS Big Sur (Intel) with Xcode 13 & macOS Montery Beta (Apple Silicon) with Xcode 13.
+## Credits
 
-**Automated compilation:**
+Based on:
 
-Run the `build-mac-app.sh` script from the root of the repository. The app will be available in a DMG file named `SpaceCadetPinball-<version>-mac.dmg`.
+- [k4zmu2a/SpaceCadetPinball](https://github.com/k4zmu2a/SpaceCadetPinball): the upstream decomp and SDL2 port.
+- [alula/SpaceCadetPinball](https://github.com/alula/SpaceCadetPinball): the earlier Emscripten fork. Baseline web-build ideas (TinySoundFont
+  backend approach, IDBFS link flag) originated there.
 
-Tested with: macOS Ventura (Apple Silicon) with Xcode Command Line Tools 14 & macOS Big Sur on GitHub Runner (Intel) with XCode 13.
+Original game by Cinematronics, Microsoft, and Maxis.
 
-## Plans
-
-* ~~Decompile original game~~
-* ~~Resizable window, scaled graphics~~
-* ~~Loader for high-res sprites from CADET.DAT~~
-* ~~Cross-platform port using SDL2, SDL2_mixer, ImGui~~
-* Full Tilt Cadet features
-* Localization support
-* Maybe: Support for the other two tables - Dragon and Pirate
-* Maybe: Game data editor
-
-## On 64-bit bug that killed the game
-
-I did not find it, decompiled game worked in x64 mode on the first try.\
-It was either lost in decompilation or introduced in x64 port/not present in x86 build.\
-Based on public description of the bug (no ball collision), I guess that the bug was in `TEdgeManager::TestGridBox`
